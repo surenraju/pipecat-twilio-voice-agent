@@ -1,1 +1,0 @@
-python outbound.py --to +971585440209 --from +16602906311
