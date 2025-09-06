@@ -1,0 +1,4 @@
+pipecat-ai[cartesia,openai,silero,deepgram,websocket,runner,google,webrtc]>=0.0.83
+twilio>=9.0.0
+pyngrok>=7.2.0
+python-dotenv
