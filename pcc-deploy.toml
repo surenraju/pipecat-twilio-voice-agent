@@ -1,0 +1,6 @@
+agent_name = "pipecat-twilio-voice-agent"
+image = "surenraju/pipecat-twilio-voice-agent:0.1" 
+secret_set = "pipecat-twilio-voice-agent-secrets"
+
+[scaling]
+	min_agents = 1

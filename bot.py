@@ -1,31 +1,3 @@
-#
-# Copyright (c) 2024–2025, Daily
-#
-# SPDX-License-Identifier: BSD 2-Clause License
-#
-
-"""Pipecat Twilio Phone Example.
-
-The example runs a simple voice AI bot that you can connect to using a
-phone via Twilio.
-
-Required AI services:
-- Deepgram (Speech-to-Text)
-- Cerebras (LLM)
-- Cartesia (Text-to-Speech)
-
-The example connects between client and server using a Twilio websocket
-connection.
-
-Run the bot using::
-
-    python bot.py --transport twilio --proxy your_ngrok.ngrok.io
-
-Or use the setup script::
-
-    python setup_ngrok_twilio.py --launch-bot
-"""
-
 import os
 import asyncio
 from datetime import datetime
@@ -39,18 +11,24 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
-from pipecat.runner.types import RunnerArguments
+from pipecat.runner.types import (
+    RunnerArguments,
+    SmallWebRTCRunnerArguments,
+    WebSocketRunnerArguments,
+)
+from pipecatcloud.agent import DailySessionArguments
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.llm_service import FunctionCallParams
-from pipecat.transports.base_transport import BaseTransport
-from pipecat.transports.network.fastapi_websocket import (
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.services.gemini_multimodal_live.gemini import GeminiMultimodalLiveLLMService
 
 # Load environment variables (API keys, Twilio, etc.)
@@ -59,15 +37,6 @@ load_dotenv(override=True)
 
 async def run_bot(transport: BaseTransport):
     logger.info(f"Starting bot")
-
-    # STT: transcribe caller audio to text (Deepgram)
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-
-    # TTS: convert assistant text to speech (Cartesia)
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="5c42302c-194b-4d0c-ba1a-8cb485c84ab9",
-    )
 
     # LLM: generate responses and call tools (Cerebras)
     llm = GeminiMultimodalLiveLLMService(
@@ -171,31 +140,67 @@ async def run_bot(transport: BaseTransport):
 
 
 async def bot(runner_args: RunnerArguments):
-    """Main bot entry point for the bot starter."""
+    """Main bot entry point compatible with WebRTC and Twilio transports."""
 
-    # Parse the websocket URL to auto-detect Twilio transport and call data
-    transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
-    logger.info(f"Auto-detected transport: {transport_type}")
+    transport = None
 
-    # Twilio serializer: attach call identifiers and credentials
-    serializer = TwilioFrameSerializer(
-        stream_sid=call_data["stream_id"],
-        call_sid=call_data["call_id"],
-        account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
-        auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
-    )
+    if isinstance(runner_args, SmallWebRTCRunnerArguments):
+        logger.info("Using WebRTC transport")
+        transport = SmallWebRTCTransport(
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                vad_analyzer=SileroVADAnalyzer(),
+            ),
+            webrtc_connection=runner_args.webrtc_connection,
+        )
 
-    # Transport: FastAPI WebSocket with audio in/out, VAD, and serialization
-    transport = FastAPIWebsocketTransport(
-        websocket=runner_args.websocket,
-        params=FastAPIWebsocketParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            add_wav_header=False,
-            vad_analyzer=SileroVADAnalyzer(),
-            serializer=serializer,
-        ),
-    )
+    elif isinstance(runner_args, WebSocketRunnerArguments):
+        logger.info("Using WebSocket transport (Twilio/Telephony)")
+        # Parse the websocket URL to auto-detect Twilio transport and call data
+        transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
+        logger.info(f"Auto-detected telephony transport: {transport_type}")
+
+        # Twilio serializer: attach call identifiers and credentials
+        serializer = TwilioFrameSerializer(
+            stream_sid=call_data["stream_id"],
+            call_sid=call_data["call_id"],
+            account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
+            auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
+        )
+
+        # Transport: FastAPI WebSocket with audio in/out, VAD, and serialization
+        transport = FastAPIWebsocketTransport(
+            websocket=runner_args.websocket,
+            params=FastAPIWebsocketParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                add_wav_header=False,
+                vad_analyzer=SileroVADAnalyzer(),
+                serializer=serializer,
+            ),
+        )
+
+    elif isinstance(runner_args, DailySessionArguments):
+        logger.info("Using Daily.co session transport")
+        # For Daily.co sessions, we can use the same WebRTC transport
+        # but with Daily-specific connection handling
+        transport = SmallWebRTCTransport(
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                vad_analyzer=SileroVADAnalyzer(),
+            ),
+            webrtc_connection=runner_args.webrtc_connection,
+        )
+
+    else:
+        logger.error(f"Unsupported runner arguments type: {type(runner_args)}")
+        return
+
+    if transport is None:
+        logger.error("Failed to create transport")
+        return
 
     # Start the bot using this transport
     await run_bot(transport)
